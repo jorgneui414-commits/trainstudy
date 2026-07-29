@@ -5,6 +5,12 @@ __pycache__/
 .coverage
 htmlcov/
 
+# YOLO 训练输出与下载的预训练权重
+runs/
+*.pt
+.ultralytics/
+Ultralytics/
+
 # 虚拟环境
 .venv/
 venv/
@@ -23,4 +29,3 @@ data/datasets/*
 !data/datasets/versions/
 data/datasets/versions/*
 !data/datasets/versions/.gitkeep
-
