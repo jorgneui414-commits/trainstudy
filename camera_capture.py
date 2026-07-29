@@ -69,7 +69,10 @@ def _is_index_reserved(output_dir: Path, index: int) -> bool:
     )
 
 
-def _open_camera(camera_id: int):
+def open_camera(camera_id: int):
+    """按当前系统打开本地摄像头，Windows 优先使用 DirectShow 后端。"""
+
+    _validate_camera_id(camera_id)
     try:
         # DirectShow 对 Windows 下的普通 USB 摄像头通常更稳定；其他系统使用默认后端。
         if platform.system() == "Windows":
@@ -103,7 +106,7 @@ def capture_images(
     next_index = _next_image_index(destination)
     saved_images: list[Path] = []
     last_saved_at: float | None = None
-    camera = _open_camera(camera_id)
+    camera = open_camera(camera_id)
 
     try:
         if not camera.isOpened():
