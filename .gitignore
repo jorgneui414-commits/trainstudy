@@ -1,0 +1,26 @@
+# Python 缓存与测试产物
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# IDE 与系统文件
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# 采集、标注和生成的数据通常较大，不提交到 Git
+data/raw_labeled/*
+!data/raw_labeled/.gitkeep
+data/datasets/*
+!data/datasets/versions/
+data/datasets/versions/*
+!data/datasets/versions/.gitkeep
+
