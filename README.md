@@ -2,12 +2,13 @@
 
 这是一个独立的视觉学习项目。`VisionTeachDemo` 只用于阅读和参考，本项目不会导入、复制或修改旧项目中的代码与数据。
 
-当前项目完成四件事：
+当前项目完成五件事：
 
 1. 用 OpenCV 从本地普通 USB 相机采集图片。
 2. 校验扁平目录中的 YOLO 标注，拆分训练集、验证集和测试集，并生成 `data.yaml`。
 3. 使用 Ultralytics YOLO 训练普通 Detect 或 OBB 模型。
 4. 使用训练好的模型，对普通 USB 相机画面进行实时推理验证。
+5. 使用 Kinect v2 同步彩色/深度帧运行 Detect 或 OBB 推理，并计算毫米制相机 3D 坐标。
 
 ## 项目结构
 
@@ -15,13 +16,16 @@
 VisionStudyProject/
 ├── config.py                    # 经常调整的参数
 ├── camera_capture.py            # OpenCV 普通相机采集逻辑
+├── kinect_v2_camera.py          # Kinect v2 官方 SDK 同步 RGB-D 取帧和坐标映射
+├── depth_detection.py           # YOLO 结果解析、深度融合和伪彩色预览
 ├── yolo_dataset_builder.py      # YOLO 数据校验、拆分和版本管理
 ├── yolo_trainer.py              # 训练前校验、设备选择和 YOLO 训练调用
 ├── scripts/
 │   ├── 01_capture_images.py
 │   ├── 02_build_yolo_dataset.py
 │   ├── 03_train_yolo.py
-│   └── 04_realtime_inference.py
+│   ├── 04_realtime_inference.py
+│   └── 05_realtime_depth_inference.py
 ├── data/
 │   ├── raw_labeled/             # 原始图片、标签和 classes.txt
 │   └── datasets/versions/       # 每次构建出的数据集版本
@@ -76,6 +80,10 @@ E:\anaconda\envs\part_yolo_gpu\python.exe -c "import torch; print(torch.__versio
 - `INFERENCE_MODEL_PATH`：实时推理所加载的 `best.pt` 路径；完成新的训练后，请确认它指向要验证的结果。
 - `INFERENCE_DEVICE = 0`：实时推理默认使用第一张 NVIDIA GPU；可改为 `"cpu"`。
 - `INFERENCE_CONFIDENCE_THRESHOLD = 0.25`：低于该置信度的目标不会显示。
+- `KINECT_SDK_ASSEMBLY_PATH`：Kinect for Windows SDK 2.0 的 `Microsoft.Kinect.dll` 路径。
+- `DEPTH_ROI_RATIO = 0.30`：在检测框中央 30% 区域采样深度。
+- `DEPTH_MIN_MM`、`DEPTH_MAX_MM`：有效深度范围，默认 500~4500 mm。
+- `DEPTH_MIN_VALID_SAMPLES = 5`：至少多少个有效映射点才返回 3D 坐标。
 
 ## 3. 采集图片
 
@@ -89,7 +97,7 @@ E:\anaconda\envs\part_yolo_cpu\python.exe scripts\01_capture_images.py
 
 自动测试不会启动真实相机。第一次连接硬件时，应先把 `CAPTURE_IMAGE_COUNT` 设为较小的值，确认画面、分辨率和保存目录都正确。
 
-当前阶段仅支持本地普通 USB 相机；具体 SDK 等型号确定后再单独设计。
+普通图片采集仍使用本节的 UVC 相机；Kinect v2 深度实时检测使用后面的步骤 8。
 
 ## 4. 准备 YOLO 原始标注
 
@@ -207,7 +215,72 @@ E:\anaconda\envs\part_yolo_gpu\python.exe scripts\04_realtime_inference.py
 如果没有检测到相机，脚本会提示检查连接、Windows 设备识别、相机隐私权限，或修改
 `CAMERA_ID` 后重新运行。
 
-## 8. 运行测试
+## 8. Kinect v2 Detect/OBB 深度实时检测
+
+### 8.1 运行前条件
+
+此功能面向 Xbox One Kinect / Kinect v2（本机设备 PID 为 `VID_045E&PID_02C4`），需要：
+
+- Kinect for Windows Runtime 2.0、SDK 2.0 和驱动已安装。
+- Kinect Studio 的 Monitor 能显示彩色帧和深度帧。
+- 使用 `part_yolo_gpu` 的 64 位 Python 3.10 环境，并已运行
+  `E:\anaconda\envs\part_yolo_gpu\python.exe -m pip install -r requirements.txt`。
+- 启动 Python 前，在 Kinect Studio 左上角断开 Kinect，并关闭 Kinect Studio。若 Studio
+  仍保持 `Connected`，它的 `KStudioHostService` 会占用相机，Python 会提示设备不可用。
+- 在 Windows 声音设置中找到“麦克风阵列（Xbox NUI Sensor）”，将“音频增强”设置为
+  “关闭”。音频增强开启时，Kinect 可能先成功输出少量帧，随后停止提供同步 RGB-D 帧。
+
+YOLO 仍然只使用彩色图训练，深度图不参与模型训练。运行时，脚本把 Detect 水平框或
+OBB 旋转框映射到深度空间，再从检测框中央区域取有效深度中位数。彩色/深度对齐和
+相机 X/Y/Z 坐标均由 Kinect SDK 的 `CoordinateMapper` 计算，不使用手填的假内参。
+
+运行前在 `config.py` 中确认下面两项匹配：
+
+```python
+YOLO_TASK = "detect"  # 或 "obb"
+INFERENCE_MODEL_PATH = ...  # 对应任务的 best.pt
+```
+
+脚本会读取模型自身的任务类型；模型与 `YOLO_TASK` 不一致时会停止并给出提示。
+
+### 8.2 启动第五个脚本
+
+```powershell
+E:\anaconda\envs\part_yolo_gpu\python.exe scripts\05_realtime_depth_inference.py
+```
+
+启动后会持续执行 YOLO 和深度融合，并显示两个窗口：
+
+- 彩色窗口：Detect 水平框或 OBB 旋转框、类别、置信度、方向角以及相机 X/Y/Z。
+- 深度窗口：Kinect 原始深度的伪彩色预览。
+
+`distance_mm` 和 `camera_x_mm/y_mm/z_mm` 全部使用毫米；二维中心点及检测框仍使用像素。
+Detect 没有方向角，OBB 的 `orientation_deg` 使用度。深度有效点不足时仍保留二维检测，
+但三维坐标显示为无效。按 `q` 或 `Esc` 会释放 Kinect 并关闭窗口。
+
+第五个脚本不会启动 HTTP 服务、保存运行图片或控制机器人。相机坐标也不能在未经
+手眼标定的情况下直接作为机器人运动坐标。
+
+### 8.3 常见故障：音频增强导致 RGB-D 数据流中断
+
+如果 Kinect v2 Configuration Verifier 中的 `Verify Kinect Depth and Color Streams`
+在绿色、橙色和红色之间反复变化，或者第五个脚本完成首帧推理后出现下面的错误：
+
+```text
+在 2.0 秒内没有取得 Kinect v2 的同步彩色+深度帧。
+```
+
+请先关闭 Kinect 的音频增强：
+
+1. 打开 Windows“设置 → 系统 → 声音”。
+2. 进入“所有声音设备”，选择“麦克风阵列（Xbox NUI Sensor）”。
+3. 将“音频增强”设置为“关闭”。
+4. 关闭 Configuration Verifier 和 Kinect Studio，再重新运行第五个脚本。
+
+本机已经确认，音频增强未关闭会导致 Kinect SDK 的 `MultiSourceFrameReader` 间歇停止
+产生同步帧；此时相机仍可能显示为已连接，因此单纯增加取帧超时时间不能解决问题。
+
+## 9. 运行测试
 
 ```powershell
 E:\anaconda\envs\part_yolo_gpu\python.exe -m unittest discover -s tests -v

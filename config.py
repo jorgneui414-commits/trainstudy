@@ -72,3 +72,27 @@ INFERENCE_MODEL_PATH = TRAIN_OUTPUT_DIR / "yolo11n_detect" / "weights" / "best.p
 INFERENCE_DEVICE = 0
 # 低于该置信度的预测不会显示在实时画面中。
 INFERENCE_CONFIDENCE_THRESHOLD = 0.25
+
+# Kinect v2 深度实时推理参数（步骤 05）
+# 第五步直接复用上面的 YOLO_TASK、INFERENCE_MODEL_PATH、INFERENCE_DEVICE、
+# INFERENCE_CONFIDENCE_THRESHOLD 和 TRAIN_IMAGE_SIZE，避免为同一含义重复设置参数。
+# YOLO_TASK 决定解析普通水平框（detect）还是旋转框（obb），模型路径必须与任务匹配。
+# 使用 Kinect for Windows SDK 2.0 自带的 Microsoft.Kinect.dll；无需填写相机内参，
+# 彩色/深度对齐和相机 XYZ 坐标都由 SDK CoordinateMapper 计算。
+KINECT_SDK_ASSEMBLY_PATH = Path(
+    r"C:\Program Files\Microsoft SDKs\Kinect\v2.0_1409\Assemblies\Microsoft.Kinect.dll"
+)
+# 打开设备后最多等待多少秒，确认 Kinect 已经进入可用状态。
+KINECT_AVAILABILITY_TIMEOUT_SECONDS = 5.0
+# 每次读取同步彩色+深度帧时的最长等待时间，不是整段程序的运行时长。
+KINECT_FRAME_TIMEOUT_SECONDS = 2.0
+
+# Kinect v2 深度原始单位为毫米。检测框中央 30% 区域内只保留 500~4500 mm，
+# 至少 5 个有效映射点才返回深度；相机 X/Y/Z 在读取后也统一转换为毫米。
+# 0.30 表示只采样检测框中心宽度和高度各 30% 的区域，减少背景像素干扰。
+DEPTH_ROI_RATIO = 0.30
+# 超出这个可靠量程的像素不会参与三维坐标计算。
+DEPTH_MIN_MM = 500
+DEPTH_MAX_MM = 4500
+# 有效点少于这个数量时仍保留二维检测框，但三维坐标会标记为无效。
+DEPTH_MIN_VALID_SAMPLES = 5
