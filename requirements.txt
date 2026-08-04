@@ -3,3 +3,4 @@ opencv-python
 PyYAML
 ultralytics==8.4.92
 pythonnet==3.0.5
+PyMySQL

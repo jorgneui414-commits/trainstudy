@@ -388,11 +388,38 @@ def _validate_depth_inputs(
 
 
 def _polygon_angle_deg(points: list[list[float]]) -> float:
-    """根据 OBB 第一个角点到第二个角点的方向计算角度。"""
+    """返回 OBB 长轴方向：向右为 0 度，顺时针增加，范围为 [0, 180)。
 
-    dx = points[1][0] - points[0][0]
-    dy = points[1][1] - points[0][1]
-    return math.degrees(math.atan2(dy, dx))
+    Ultralytics 或测试替身不一定从同一个角点开始，也可能按相反方向给出四角点。
+    先按角点绕中心的方位重新排序，再从四条矩形边中选择最长边，因此结果不依赖
+    起始角点和顺/逆时针顺序。图像 y 坐标向下，所以 atan2 的正方向正好是顺时针。
+    """
+
+    vertices = np.asarray(points, dtype=np.float64).reshape((-1, 2))
+    if vertices.shape != (4, 2) or not np.all(np.isfinite(vertices)):
+        raise ValueError("OBB 必须包含 4 个有限的二维角点。")
+
+    center = np.mean(vertices, axis=0)
+    relative = vertices - center
+    order = np.argsort(np.arctan2(relative[:, 1], relative[:, 0]))
+    ordered = vertices[order]
+    edges = np.roll(ordered, -1, axis=0) - ordered
+    edge_lengths_squared = np.sum(edges * edges, axis=1)
+    longest_edge = edges[int(np.argmax(edge_lengths_squared))]
+    if float(np.max(edge_lengths_squared)) <= 0:
+        raise ValueError("OBB 角点不能全部重合。")
+
+    angle_deg = math.degrees(
+        math.atan2(float(longest_edge[1]), float(longest_edge[0]))
+    ) % 180.0
+    # 避免浮点舍入在水平边上产生接近 180 的值，严格保持半开区间 [0, 180)。
+    if math.isclose(angle_deg, 180.0, abs_tol=1e-10) or math.isclose(
+        angle_deg,
+        0.0,
+        abs_tol=1e-10,
+    ):
+        return 0.0
+    return angle_deg
 
 
 def _class_name(names: Any, class_id: int) -> str:

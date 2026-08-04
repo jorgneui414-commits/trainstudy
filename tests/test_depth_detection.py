@@ -107,6 +107,53 @@ class DepthDetectionTests(unittest.TestCase):
         )
         self.assertAlmostEqual(float(detection["orientation_deg"]), 0.0)
 
+    def test_obb_orientation_uses_long_axis_and_ignores_corner_order(self) -> None:
+        # 图像坐标 y 向下，因此 30 度表示长轴从右方向顺时针倾斜 30 度。
+        angle_rad = np.deg2rad(30.0)
+        long_axis = np.array([np.cos(angle_rad), np.sin(angle_rad)]) * 20.0
+        short_axis = np.array([-np.sin(angle_rad), np.cos(angle_rad)]) * 5.0
+        center = np.array([50.0, 50.0])
+        inclined = np.array(
+            [
+                center - long_axis - short_axis,
+                center + long_axis - short_axis,
+                center + long_axis + short_axis,
+                center - long_axis + short_axis,
+            ]
+        )
+
+        cases = {
+            "horizontal": (
+                np.array([[10.0, 20.0], [50.0, 20.0], [50.0, 30.0], [10.0, 30.0]]),
+                0.0,
+            ),
+            "vertical": (
+                np.array([[20.0, 10.0], [30.0, 10.0], [30.0, 50.0], [20.0, 50.0]]),
+                90.0,
+            ),
+            "inclined": (inclined, 30.0),
+            # 故意打乱起点和顺序；长轴角度仍应与上一个案例相同。
+            "shuffled": (inclined[[2, 0, 3, 1]], 30.0),
+        }
+        for label, (polygon, expected_angle) in cases.items():
+            with self.subTest(label=label):
+                result = SimpleNamespace(
+                    names={0: "part"},
+                    obb=FakeObb(
+                        polygon.reshape((1, 4, 2)),
+                        np.array([0.0]),
+                        np.array([0.9]),
+                    ),
+                )
+
+                orientation = float(
+                    parse_yolo_result(result, task="obb")[0]["orientation_deg"]
+                )
+
+                self.assertGreaterEqual(orientation, 0.0)
+                self.assertLess(orientation, 180.0)
+                self.assertAlmostEqual(orientation, expected_angle, places=5)
+
     def test_empty_results_and_invalid_task_are_handled(self) -> None:
         # 第一维长度为 0 表示这一帧没有检测到任何目标。
         detect_result = SimpleNamespace(

@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import ctypes
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,11 +50,16 @@ class KinectV2Camera:
         self._reader: Any | None = None
         self._coordinate_mapper: Any | None = None
 
-        # 这些是重复使用的 .NET 数组缓冲区。每帧复用同一批数组，可以避免不停申请内存。
-        self._color_buffer: Any | None = None
-        self._depth_buffer: Any | None = None
-        self._color_space_points: Any | None = None
-        self._camera_space_points: Any | None = None
+        # SDK 通过 IntPtr 直接写入这些连续 NumPy 缓冲区。每帧复用同一批数组，避免
+        # 先写 .NET 数组、固定内存、再复制到 NumPy 的中转过程。
+        self._color_buffer: np.ndarray | None = None
+        self._depth_buffer: np.ndarray | None = None
+        self._color_space_points: np.ndarray | None = None
+        self._camera_space_points: np.ndarray | None = None
+        self._color_buffer_pointer: Any | None = None
+        self._depth_buffer_pointer: Any | None = None
+        self._color_space_points_pointer: Any | None = None
+        self._camera_space_points_pointer: Any | None = None
         self._color_image_format: Any | None = None
 
     @property
@@ -89,11 +93,9 @@ class KinectV2Camera:
 
             # 这些命名空间由 pythonnet 在运行时动态提供。程序可以正常导入，但 Pylance
             # 无法静态找到对应的 .py 文件，所以只在这两处忽略 reportMissingImports。
-            from System import Array, Byte, UInt16  # pyright: ignore[reportMissingImports]
+            from System import IntPtr  # pyright: ignore[reportMissingImports]
             from Microsoft.Kinect import (  # pyright: ignore[reportMissingImports]
-                CameraSpacePoint,
                 ColorImageFormat,
-                ColorSpacePoint,
                 FrameSourceTypes,
                 KinectSensor,
             )
@@ -132,16 +134,32 @@ class KinectV2Camera:
             self.DEPTH_WIDTH = int(depth_description.Width)
             self.DEPTH_HEIGHT = int(depth_description.Height)
 
-            # 彩色图以 BGRA 保存，每个像素 4 个 Byte；深度图每个像素是一个 UInt16。
-            color_pixel_count = self.COLOR_WIDTH * self.COLOR_HEIGHT
-            depth_pixel_count = self.DEPTH_WIDTH * self.DEPTH_HEIGHT
-            self._color_buffer = Array.CreateInstance(Byte, color_pixel_count * 4)
-            self._depth_buffer = Array.CreateInstance(UInt16, depth_pixel_count)
-
-            # 深度图有多少像素，就需要多少组映射结果：
-            # ColorSpacePoint 保存对应的彩色像素位置，CameraSpacePoint 保存对应的三维坐标。
-            self._color_space_points = Array.CreateInstance(ColorSpacePoint, depth_pixel_count)
-            self._camera_space_points = Array.CreateInstance(CameraSpacePoint, depth_pixel_count)
+            # NumPy 默认创建 C 连续数组。SDK 的 IntPtr 重载会按字节直接填满这些缓冲区；
+            # 两种映射点在官方程序集中分别是连续的 2 个和 3 个 float32。
+            self._color_buffer = np.empty(
+                (self.COLOR_HEIGHT, self.COLOR_WIDTH, 4),
+                dtype=np.uint8,
+            )
+            self._depth_buffer = np.empty(
+                (self.DEPTH_HEIGHT, self.DEPTH_WIDTH),
+                dtype=np.uint16,
+            )
+            self._color_space_points = np.empty(
+                (self.DEPTH_HEIGHT, self.DEPTH_WIDTH, 2),
+                dtype=np.float32,
+            )
+            self._camera_space_points = np.empty(
+                (self.DEPTH_HEIGHT, self.DEPTH_WIDTH, 3),
+                dtype=np.float32,
+            )
+            self._color_buffer_pointer = IntPtr(int(self._color_buffer.ctypes.data))
+            self._depth_buffer_pointer = IntPtr(int(self._depth_buffer.ctypes.data))
+            self._color_space_points_pointer = IntPtr(
+                int(self._color_space_points.ctypes.data)
+            )
+            self._camera_space_points_pointer = IntPtr(
+                int(self._camera_space_points.ctypes.data)
+            )
             self._color_image_format = ColorImageFormat.Bgra
             self._coordinate_mapper = sensor.CoordinateMapper
             self._reader = reader
@@ -180,54 +198,41 @@ class KinectV2Camera:
                 if color_frame is None or depth_frame is None:
                     continue
 
-                # 先把当前帧复制到 open() 创建的 .NET 缓冲区。
-                color_frame.CopyConvertedFrameDataToArray(
-                    self._color_buffer,
+                # 使用 SDK 官方 IntPtr 重载，把彩色和深度数据直接写入 NumPy 缓冲区。
+                color_frame.CopyConvertedFrameDataToIntPtr(
+                    self._color_buffer_pointer,
+                    int(self._color_buffer.nbytes),
                     self._color_image_format,
                 )
-                depth_frame.CopyFrameDataToArray(self._depth_buffer)
+                depth_frame.CopyFrameDataToIntPtr(
+                    self._depth_buffer_pointer,
+                    int(self._depth_buffer.nbytes),
+                )
 
                 # 同一深度像素可以被映射成两种结果：
                 # 1. 它位于彩色图的哪个像素；2. 它在相机坐标系中的三维位置。
-                self._coordinate_mapper.MapDepthFrameToColorSpace(
-                    self._depth_buffer,
-                    self._color_space_points,
+                self._coordinate_mapper.MapDepthFrameToColorSpaceUsingIntPtr(
+                    self._depth_buffer_pointer,
+                    int(self._depth_buffer.nbytes),
+                    self._color_space_points_pointer,
+                    int(self._color_space_points.nbytes),
                 )
-                self._coordinate_mapper.MapDepthFrameToCameraSpace(
-                    self._depth_buffer,
-                    self._camera_space_points,
+                self._coordinate_mapper.MapDepthFrameToCameraSpaceUsingIntPtr(
+                    self._depth_buffer_pointer,
+                    int(self._depth_buffer.nbytes),
+                    self._camera_space_points_pointer,
+                    int(self._camera_space_points.nbytes),
                 )
 
-                # SDK 缓冲区属于 .NET；下面把它们复制为独立的 NumPy 数组，供 OpenCV
-                # 和后续深度融合使用。复制后即使释放 SDK 帧，NumPy 数据仍然有效。
-                bgra = _copy_pinned_array(
-                    self._color_buffer,
-                    ctypes.c_uint8,
-                    (self.COLOR_HEIGHT, self.COLOR_WIDTH, 4),
-                )
-                depth_mm = _copy_pinned_array(
-                    self._depth_buffer,
-                    ctypes.c_uint16,
-                    (self.DEPTH_HEIGHT, self.DEPTH_WIDTH),
-                )
-                depth_to_color_xy = _copy_pinned_array(
-                    self._color_space_points,
-                    ctypes.c_float,
-                    (self.DEPTH_HEIGHT, self.DEPTH_WIDTH, 2),
-                )
-                depth_to_camera_xyz_mm = _copy_pinned_array(
-                    self._camera_space_points,
-                    ctypes.c_float,
-                    (self.DEPTH_HEIGHT, self.DEPTH_WIDTH, 3),
-                )
-                # Kinect SDK 的 CameraSpacePoint 使用米；第五步从读取边界开始统一为毫米。
-                depth_to_camera_xyz_mm = _meters_to_millimeters(depth_to_camera_xyz_mm)
-
+                # 内部缓冲区会被下一次 read() 覆盖，因此返回独立数组。cvtColor 和毫米
+                # 转换本身会创建新数组；深度及彩色映射显式 copy()。
                 return KinectFrame(
-                    color_bgr=cv2.cvtColor(bgra, cv2.COLOR_BGRA2BGR),
-                    depth_mm=depth_mm,
-                    depth_to_color_xy=depth_to_color_xy,
-                    depth_to_camera_xyz_mm=depth_to_camera_xyz_mm,
+                    color_bgr=cv2.cvtColor(self._color_buffer, cv2.COLOR_BGRA2BGR),
+                    depth_mm=self._depth_buffer.copy(),
+                    depth_to_color_xy=self._color_space_points.copy(),
+                    depth_to_camera_xyz_mm=_meters_to_millimeters(
+                        self._camera_space_points
+                    ),
                 )
             finally:
                 # .NET 帧持有相机资源，成功、跳过或异常时都必须释放。
@@ -262,6 +267,10 @@ class KinectV2Camera:
         self._depth_buffer = None
         self._color_space_points = None
         self._camera_space_points = None
+        self._color_buffer_pointer = None
+        self._depth_buffer_pointer = None
+        self._color_space_points_pointer = None
+        self._camera_space_points_pointer = None
         self._color_image_format = None
 
     def __enter__(self) -> "KinectV2Camera":
@@ -271,53 +280,6 @@ class KinectV2Camera:
 
     def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
         self.release()
-
-
-def _copy_pinned_array(managed_array: Any, c_type: type, shape: tuple[int, ...]) -> np.ndarray:
-    """把 .NET 数组复制成指定形状的独立 NumPy 数组。
-
-    .NET 垃圾回收器可能移动数组在内存中的位置。读取地址之前必须先用 GCHandle 把数组
-    临时“固定”在原处，复制完成后再解除固定。
-    """
-
-    from System.Runtime.InteropServices import (  # pyright: ignore[reportMissingImports]
-        GCHandle,
-        GCHandleType,
-    )
-
-    # shape 中所有维度相乘，得到 NumPy 视图应该包含的基础数值数量。
-    item_count = int(np.prod(shape))
-    if len(managed_array) * ctypes.sizeof(c_type) != item_count * ctypes.sizeof(c_type):
-        # 对结构体数组而言一个元素包含多个 float，因此按总字节数继续校验。
-        expected_bytes = item_count * ctypes.sizeof(c_type)
-        actual_bytes = _managed_array_byte_length(managed_array)
-        if actual_bytes != expected_bytes:
-            raise RuntimeError(
-                f"Kinect SDK 数组大小不匹配：期望 {expected_bytes} 字节，实际 {actual_bytes} 字节。"
-            )
-
-    # Pinned 表示在 handle.Free() 之前不允许 .NET 移动这块数组内存。
-    handle = GCHandle.Alloc(managed_array, GCHandleType.Pinned)
-    try:
-        # 取得 .NET 数组的首地址，再让 NumPy 通过 ctypes 临时查看同一块内存。
-        address = int(handle.AddrOfPinnedObject().ToInt64())
-        view = np.ctypeslib.as_array((c_type * item_count).from_address(address))
-        # 必须 copy()：解除固定后，返回值不能继续依赖 .NET 原数组的内存地址。
-        return view.copy().reshape(shape)
-    finally:
-        handle.Free()
-
-
-def _managed_array_byte_length(managed_array: Any) -> int:
-    """返回一维 .NET 数组占用的字节数。"""
-
-    from System.Runtime.InteropServices import (  # pyright: ignore[reportMissingImports]
-        Marshal,
-    )
-
-    # 结构体数组不能只用 ctypes 的单值大小判断，需要查询 .NET 元素的真实字节数。
-    element_type = managed_array.GetType().GetElementType()
-    return int(len(managed_array)) * int(Marshal.SizeOf(element_type))
 
 
 def _meters_to_millimeters(camera_xyz_m: np.ndarray) -> np.ndarray:
